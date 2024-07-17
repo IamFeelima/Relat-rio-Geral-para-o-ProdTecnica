@@ -1,0 +1,270 @@
+import pandas as pd
+from datetime import datetime
+
+# Arquivos base
+file_path_producao = 'C:/Users/GEO/PycharmProjects/FiltroDBProduTec/_TimeSheet_consolidado_produção_tecnica.xlsx'
+file_path_programacao = 'C:/Users/GEO/PycharmProjects/FiltroDBProduTec/ProgramaçãodeRelatóriosPT2024.xlsx'
+file_path_custo = 'C:/Users/GEO/PycharmProjects/FiltroDBProduTec/produção tecnica_distrib_horas_jun2024 (1).xlsx'
+
+def gerar_relatorio(mes_inicio, ano_inicio, mes_fim, ano_fim):
+    # Carregar a planilha de produção técnica
+    df_producao = pd.read_excel(file_path_producao, sheet_name='ProdTecnica')
+
+    # Filtrar dados para os meses especificados
+    data_inicio = f"{ano_inicio}-{mes_inicio:02d}-01"
+    data_fim = f"{ano_fim}-{mes_fim:02d}-01"
+    data_fim = pd.to_datetime(data_fim) + pd.offsets.MonthEnd(1)
+
+    df_producao['data_corrigida'] = pd.to_datetime(df_producao['data_corrigida'], errors='coerce')
+    df_filtered = df_producao[
+        (df_producao['data_corrigida'] >= data_inicio) & (df_producao['data_corrigida'] <= data_fim)]
+
+    # Nome do arquivo de saída
+    output_file = f"C:/Users/GEO/PycharmProjects/FiltroDBProduTec/RelatorioPT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+    # Criar o arquivo Excel de saída
+    writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
+
+    # Aba "Metricas" de leitura
+    df_filtered.to_excel(writer, sheet_name='Metricas', index=False)
+
+    # Adicionar abas para cada mês no intervalo especificado
+    data_atual = pd.to_datetime(data_inicio)
+    while data_atual <= data_fim:
+        month_name = data_atual.strftime('%B')
+        df_month = df_filtered[df_filtered['data_corrigida'].dt.month == data_atual.month]
+        df_month.to_excel(writer, sheet_name=month_name, index=False)
+        data_atual += pd.DateOffset(months=1)
+
+    # Relatório detalhado por participante e data
+    df_sorted = df_filtered.sort_values(by=['Participante', 'data_corrigida'])
+
+    # Colunas
+    df_report = pd.DataFrame()
+    df_report['Participante'] = df_sorted['Participante']
+    df_report['Data'] = df_sorted['data_corrigida']
+    df_report['Idgeo'] = df_sorted.iloc[:, 14]
+    df_report['Idgeo | Projeto'] = df_sorted.iloc[:, 16]
+    df_report['Perfil'] = df_sorted.iloc[:, 10]
+    df_report['Atividade'] = df_sorted.iloc[:, 12]
+    df_report['Horas'] = df_sorted.iloc[:, 18]
+    df_report['Carteira'] = df_sorted.iloc[:, 15]
+
+    # Gerar a lista de meses dinamicamente
+    df_programacao = pd.ExcelFile(file_path_programacao)
+    meses = pd.date_range(start=f"{ano_inicio}-{mes_inicio:02d}-01", end=f"{ano_fim}-{mes_fim:02d}-01", freq='M').strftime('%b %y')
+
+    idgeo_associacao = {}
+    status_projeto = {}
+    complexidade_projeto = {}
+
+    # for de verificação
+    for mes in meses:
+        if mes in df_programacao.sheet_names:
+            df_mes = pd.read_excel(df_programacao, sheet_name=mes)
+            print(f"Processando mês: {mes}")
+            print(f"Colunas disponíveis: {df_mes.columns}")
+            df_mes['ID_Projeto_Prefix'] = df_mes.iloc[:, 3].astype(str).str[:7]
+            for index, row in df_mes.iterrows():
+                idgeo_associacao[row['ID_Projeto_Prefix']] = row['IDGEO - Projeto']
+                status_projeto[row['ID_Projeto_Prefix']] = row['Status']
+                complexidade_projeto[row['ID_Projeto_Prefix']] = row['Complexidade']
+        else:
+            print(f"Mês {mes} não encontrado nas abas do arquivo de programação.")
+
+    # Verificação dos dicionários mapeados
+    print("idgeo_associacao:", idgeo_associacao)
+    print("status_projeto:", status_projeto)
+    print("complexidade_projeto:", complexidade_projeto)
+
+    df_report['IDgeo associação'] = df_report['Idgeo | Projeto'].str[:7].map(idgeo_associacao)
+    df_report['Status'] = df_report['Idgeo | Projeto'].str[:7].map(status_projeto)
+    df_report['Complexidade'] = df_report['Idgeo | Projeto'].str[:7].map(complexidade_projeto)
+
+    # Excluir linhas que não têm informação na coluna 'Idgeo | Projeto'
+    df_report = df_report.dropna(subset=['Idgeo | Projeto'])
+
+    # Carregar a planilha de custos
+    df_custo = pd.read_excel(file_path_custo, sheet_name='QUADRO')
+    if 'Nome' in df_custo.columns and 'Custo Total, em R$' in df_custo.columns:
+        df_custo = df_custo[['Nome', 'Custo Total, em R$']]
+    else:
+        print("A planilha de custos não contém as colunas 'Nome' e 'Custo Total, em R$'")
+        return
+
+    # Verificar valores únicos de participante no relatório
+    participantes_unicos = df_report['Participante'].unique()
+    print("Participantes únicos no relatório:", participantes_unicos)
+
+    # Normalizar os nomes dos participantes
+    df_report['Participante'] = df_report['Participante'].str.upper()
+    df_custo['Nome'] = df_custo['Nome'].str.upper()
+
+    # Verificar participantes com custo associado
+    print("Participantes com custo associado no arquivo de custo:", df_custo['Nome'].unique())
+
+    def calcular_custo_fragmentado(row):
+        participante = row['Participante']
+        horas_fragmentadas = row['Horas']
+        custo_total = df_custo[df_custo['Nome'] == participante]['Custo Total, em R$'].values
+        if len(custo_total) > 0:
+            custo_total = custo_total[0]
+            total_horas_mes = df_report[df_report['Participante'] == participante]['Horas'].sum()
+            custo_por_hora = custo_total / total_horas_mes
+            return horas_fragmentadas * custo_por_hora
+        else:
+            return 0
+
+    df_report['Custo fragmentos do hora'] = df_report.apply(calcular_custo_fragmentado, axis=1)
+
+    # Verificação final das colunas mapeadas
+    print("df_report['IDgeo associação']:", df_report['IDgeo associação'].head())
+    print("df_report['Status']:", df_report['Status'].head())
+    print("df_report['Complexidade']:", df_report['Complexidade'].head())
+    print("df_report['Custo fragmentos do hora']:", df_report['Custo fragmentos do hora'].head())
+
+    # Relatorio final
+    df_report.to_excel(writer, sheet_name='Metricas Detalhadas', index=False)
+
+    # Gerar a aba de custo unitário por participante
+    participantes_custo_unitario = []
+    for participante in df_report['Participante'].unique():
+        custo_total = df_custo[df_custo['Nome'] == participante]['Custo Total, em R$'].values
+        if len(custo_total) > 0:
+            custo_total = custo_total[0]
+            total_horas_mes = df_report[df_report['Participante'] == participante]['Horas'].sum()
+            custo_por_hora = custo_total / total_horas_mes
+
+            # Calcular horas por mês
+            horas_por_mes = df_report[df_report['Participante'] == participante].groupby(df_report['Data'].dt.to_period('M'))['Horas'].sum().reset_index()
+            horas_por_mes.columns = ['Mês', 'Total de Horas']
+            horas_por_mes['Participante'] = participante
+
+            for _, row in horas_por_mes.iterrows():
+                participantes_custo_unitario.append({
+                    'Participante': participante,
+                    'Custo Total': custo_total,
+                    'Custo Unitário por Hora': custo_por_hora,
+                    'Mês': row['Mês'],
+                    'Total de Horas': row['Total de Horas']
+                })
+
+    df_custo_unitario = pd.DataFrame(participantes_custo_unitario)
+    df_custo_unitario.to_excel(writer, sheet_name='Custo Unitário', index=False)
+
+    # Gerar a aba "Status Mensais"
+    status_mensais = []
+    for participante in df_report['Participante'].unique():
+        df_participante = df_report[df_report['Participante'] == participante]
+        projetos = df_participante.groupby(['IDgeo associação', df_participante['Data'].dt.to_period('M')])[
+            'Status'].first().reset_index()
+        projetos.columns = ['IDgeo associação', 'Mês', 'Status']
+        projetos['Participante'] = participante
+        status_mensais.extend(projetos.to_dict('records'))
+
+    df_status_mensais = pd.DataFrame(status_mensais)
+
+    # Reordenar colunas
+    df_status_mensais = df_status_mensais[['Participante', 'Mês', 'IDgeo associação', 'Status']]
+
+    # Validar e buscar status na planilha de programação
+    df_programacao = pd.ExcelFile(file_path_programacao)
+    for mes in meses:
+        if mes in df_programacao.sheet_names:
+            df_mes = pd.read_excel(df_programacao, sheet_name=mes)
+            df_mes['ID_Projeto_Prefix'] = df_mes.iloc[:, 3].astype(str).str[:7]
+            for index, row in df_mes.iterrows():
+                idgeo = row['ID_Projeto_Prefix']
+                status = row['Status']
+                mask = (df_status_mensais['IDgeo associação'] == idgeo) & (df_status_mensais['Mês'] == mes)
+                df_status_mensais.loc[mask, 'Status'] = status
+
+    # Salvar a aba "Status Mensais" no arquivo Excel
+    df_status_mensais.to_excel(writer, sheet_name='Status Mensais', index=False)
+
+    # Gerar a aba "Quantidade por Status"
+    quantidade_por_status = df_status_mensais.groupby(['Status', 'Mês']).size().unstack(fill_value=0)
+
+    # Salvar a aba "Quantidade por Status" no arquivo Excel
+    quantidade_por_status.to_excel(writer, sheet_name='Quantidade por Status')
+
+    # Gerar a aba "Horas por Status"
+    horas_por_status = []
+    for (idgeo_projeto, mes, participante), group in df_report.groupby(
+            ['Idgeo | Projeto', df_report['Data'].dt.to_period('M'), 'Participante']):
+        horas_total = group['Horas'].sum()
+        custo_total = group['Custo fragmentos do hora'].sum()
+        status = group['Status'].iloc[0]
+        complexidade = group['Complexidade'].iloc[0]
+        horas_por_status.append({
+            'Idgeo | Projeto': idgeo_projeto,
+            'Mês': mes,
+            'Participante': participante,
+            'Status': status,
+            'Complexidade': complexidade,
+            'Total de Horas': horas_total,
+            'Custo Total': custo_total
+        })
+
+    df_horas_por_status = pd.DataFrame(horas_por_status)
+
+    # Reordenar colunas
+    df_horas_por_status = df_horas_por_status[
+        ['Idgeo | Projeto', 'Mês', 'Participante', 'Status', 'Complexidade', 'Total de Horas', 'Custo Total']]
+
+    # Salvar a aba "Horas por Status" no arquivo Excel
+    df_horas_por_status.to_excel(writer, sheet_name='Horas por Status', index=False)
+
+    # Gerar a aba "Complexidade"
+    complexidade_resumo = []
+    for (idgeo_projeto, mes), group in df_report.groupby(
+            ['Idgeo | Projeto', df_report['Data'].dt.to_period('M')]):
+        horas_total = group['Horas'].sum()
+        custo_total = group['Custo fragmentos do hora'].sum()
+        complexidade = group['Complexidade'].iloc[0]
+        complexidade_resumo.append({
+            'Idgeo | Projeto': idgeo_projeto,
+            'Mês': mes,
+            'Complexidade': complexidade,
+            'Total de Horas': horas_total,
+            'Custo Total': custo_total
+        })
+
+    df_complexidade_resumo = pd.DataFrame(complexidade_resumo)
+
+    # Reordenar colunas
+    df_complexidade_resumo = df_complexidade_resumo[
+        ['Idgeo | Projeto', 'Mês', 'Complexidade', 'Total de Horas', 'Custo Total']]
+
+    # Salvar a aba "Complexidade" no arquivo Excel
+    df_complexidade_resumo.to_excel(writer, sheet_name='Complexidade', index=False)
+
+    # Gerar a aba "Horas Totais por Status"
+    horas_totais_por_status = df_report.groupby(['Status', df_report['Data'].dt.to_period('M')]).agg({
+        'Horas': 'sum'
+    }).reset_index()
+
+    # Pivotar para que os meses sejam colunas
+    horas_totais_por_status_pivot = horas_totais_por_status.pivot_table(
+        index='Status',
+        columns=horas_totais_por_status['Data'],
+        values='Horas',
+        aggfunc='sum'
+    ).fillna(0)
+
+    # Flatten the columns
+    horas_totais_por_status_pivot.columns = [str(col) for col in horas_totais_por_status_pivot.columns]
+    horas_totais_por_status_pivot.reset_index(inplace=True)
+
+    # Salvar a aba "Horas Totais por Status" no arquivo Excel
+    horas_totais_por_status_pivot.to_excel(writer, sheet_name='Horas Totais por Status', index=False)
+
+    # Fechar o arquivo Excel de saída
+    writer.close()
+
+    # Relatório foi salvo
+    print(f"Relatório salvo em: {output_file}")
+
+
+# Data inicio/fim do relatório
+gerar_relatorio(1, 2024, 6, 2024)
